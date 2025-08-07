@@ -2168,3 +2168,23 @@ class ValueRange(WindowFrame):
 
     def window_frame_start_end(self, connection, start, end):
         return connection.ops.window_frame_range_start_end(start, end)
+
+
+class JSONNull(Expression):
+    """Expression to represent JSON `null` primitive."""
+
+    def __init__(self):
+        from django.db.models import JSONField
+
+        super().__init__(output_field=JSONField())
+
+    def as_sql(self, compiler, connection):
+        if connection.features.supports_primitives_in_json_field:
+            vendor = connection.vendor
+            if vendor == "postgresql":
+                return "'null'::jsonb", []
+            elif vendor == "mysql":
+                return "CAST('null' AS JSON)", []
+            elif vendor == "oracle":
+                return "json_query('null' RETURNING CLOB)", []
+        return "'null'", []

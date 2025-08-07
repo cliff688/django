@@ -7,7 +7,7 @@ from copy import deepcopy
 from decimal import Decimal
 from unittest import mock
 
-from django.core.exceptions import FieldError
+from django.core.exceptions import FieldError, ValidationError
 from django.db import DatabaseError, NotSupportedError, connection
 from django.db.models import (
     AutoField,
@@ -16,6 +16,7 @@ from django.db.models import (
     BooleanField,
     Case,
     CharField,
+    CheckConstraint,
     Count,
     DateField,
     DateTimeField,
@@ -30,6 +31,7 @@ from django.db.models import (
     Func,
     IntegerField,
     JSONField,
+    JSONNull,
     Max,
     Min,
     Model,
@@ -2951,3 +2953,84 @@ class OrderByTests(SimpleTestCase):
             F("field").asc(nulls_first=False)
         with self.assertRaisesMessage(ValueError, msg):
             F("field").desc(nulls_last=False)
+
+
+@skipUnlessDBFeature("supports_primitives_in_data")
+class JSONNullTests(TestCase):
+    def assertNotSQLNull(self):
+        self.assertSequenceEqual(JSONFieldModel.objects.filter(data__is_null=True), [])
+
+    def test_create(self):
+        obj = JSONFieldModel.objects.create(data=JSONNull())
+        obj.refresh_from_db()
+        self.assertIsNone(obj.data)
+        self.assertNotSQLNull()
+
+    def test_update(self):
+        obj = JSONFieldModel.objects.create(data={"key": "value"})
+        JSONFieldModel.objects.filter(pk=obj.pk).update(data=JSONNull())
+        obj.refresh_from_db()
+        self.assertIsNone(obj.data)
+        self.assertNotSQLNull()
+
+    def test_filter(self):
+        obj = JSONFieldModel.objects.create(data=JSONNull())
+        found = JSONFieldModel.objects.get(data=JSONNull())
+        self.assertEqual(obj, found)
+
+    def test_save(self):
+        obj = JSONFieldModel.objects.create(data={"key": "value"})
+        obj.data = JSONNull()
+        obj.save()
+        obj.refresh_from_db()
+        self.assertIsNone(obj.data)
+        self.assertNotSQLNull()
+
+    def test_case_expression(self):
+        obj = JSONFieldModel.objects.create(data={"key": "value"})
+        with self.subTest("JSONNull() in When.then"):
+            JSONFieldModel.objects.update(
+                data=Case(
+                    When(pk=obj.pk, then=JSONNull()),
+                    default=Value({"default": True}, output_field=JSONField()),
+                )
+            )
+            obj.refresh_from_db()
+            self.assertIsNone(obj.data)
+        with self.subTest("JSONNull() in When.condition"):
+            JSONFieldModel.objects.update(
+                data=Case(
+                    When(
+                        data=JSONNull(),
+                        then=Value({"key": "replaced"}, output_field=JSONField()),
+                    )
+                ),
+            )
+            obj.refresh_from_db()
+            self.assertEqual(obj.data, {"key": "replaced"})
+
+    def test_nested_create(self):
+        obj = JSONFieldModel.objects.create(data={"key": JSONNull()})
+        obj.refresh_from_db()
+        # Stored as {"key": null}, loaded as {"key": None}.
+        self.assertEqual(obj.data, {"key": None})
+
+    def test_nested_update(self):
+        obj = JSONFieldModel.objects.create(data={"key": "value"})
+        JSONFieldModel.objects.filter(pk=obj.pk).update(data={"key": JSONNull()})
+        obj.refresh_from_db()
+        self.assertEqual(obj.data, {"key": None})
+
+    def test_nested_filter(self):
+        obj = JSONFieldModel.objects.create(data={"key": JSONNull()})
+        found = JSONFieldModel.objects.get(data={"key": JSONNull()})
+        self.assertEqual(obj, found)
+
+    def test_constraint_validation(self):
+        constraint = CheckConstraint(
+            condition=~Q(data=JSONNull()), name="not_json_null"
+        )
+        constraint.validate(JSONFieldModel, JSONFieldModel(data={"key": None}))
+        msg = f"Constraint “{constraint.name}” is violated."
+        with self.assertRaisesMessage(ValidationError, msg):
+            constraint.validate(JSONFieldModel, JSONFieldModel(data=JSONNull()))
